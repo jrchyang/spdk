@@ -14,10 +14,10 @@ DPDK_OPTS += -Dtests=false
 DPDK_CFLAGS =
 
 ifeq ($(shell uname -m),aarch64)
-ifeq ($(shell uname -p),unknown)
+# ifeq ($(shell uname -p),unknown)
 # Unknown ARM platform. ARM doesn't do platform=native which is DPDK's default. So change it.
 DPDK_OPTS += -Dplatform=generic
-endif
+# endif
 endif
 
 DPDK_KMODS = false
