@@ -143,13 +143,16 @@ spdk_scheduler_register(struct spdk_scheduler *scheduler)
 static void
 reactor_construct(struct spdk_reactor *reactor, uint32_t lcore)
 {
+	/* 设置 reactor 所在核的逻辑 id */
 	reactor->lcore = lcore;
 	reactor->flags.is_valid = true;
 
+	/* 初始化该 reactor 下线程队列头 */
 	TAILQ_INIT(&reactor->threads);
 	reactor->thread_count = 0;
 	spdk_cpuset_zero(&reactor->notify_cpuset);
 
+	/* 创建消息环 */
 	reactor->events = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 65536, SPDK_ENV_SOCKET_ID_ANY);
 	if (reactor->events == NULL) {
 		SPDK_ERRLOG("Failed to allocate events ring\n");
@@ -213,6 +216,9 @@ spdk_reactors_init(size_t msg_mempool_size)
 	uint32_t i, current_core;
 	char mempool_name[32];
 
+	/**
+	 * 初始化所有的 event mempool
+	 */
 	snprintf(mempool_name, sizeof(mempool_name), "evtpool_%d", getpid());
 	g_spdk_event_mempool = spdk_mempool_create(mempool_name,
 			       262144 - 1, /* Power of 2 minus 1 is optimal for memory consumption */
@@ -225,7 +231,10 @@ spdk_reactors_init(size_t msg_mempool_size)
 		return -1;
 	}
 
-	/* struct spdk_reactor must be aligned on 64 byte boundary */
+	/**
+	 * struct spdk_reactor must be aligned on 64 byte boundary
+	 * 为 g_reactors 分配内存，g_reactors 是一个数据，管理了所有的 reactor
+	 */
 	g_reactor_count = spdk_env_get_last_core() + 1;
 	rc = posix_memalign((void **)&g_reactors, 64,
 			    g_reactor_count * sizeof(struct spdk_reactor));
@@ -246,6 +255,9 @@ spdk_reactors_init(size_t msg_mempool_size)
 
 	memset(g_reactors, 0, (g_reactor_count) * sizeof(struct spdk_reactor));
 
+	/**
+	 * 设置了 reactor 创建线程的方法，之后需要初始化线程的时候将会调用该方法
+	 */
 	rc = spdk_thread_lib_init_ext(reactor_thread_op, reactor_thread_op_supported,
 				      sizeof(struct spdk_lw_thread), msg_mempool_size);
 	if (rc != 0) {
@@ -256,6 +268,10 @@ spdk_reactors_init(size_t msg_mempool_size)
 		return rc;
 	}
 
+	/**
+	 * 对于每一个启动的 reactor 将会初始化它们
+	 * 初始化 reactor 过程，即：绑定 lcore、初始化 spdk ring & thread、对 rusage 误操作
+	 */
 	SPDK_ENV_FOREACH_CORE(i) {
 		reactor_construct(&g_reactors[i], i);
 	}
@@ -265,6 +281,9 @@ spdk_reactors_init(size_t msg_mempool_size)
 	assert(reactor != NULL);
 	g_scheduling_reactor = reactor;
 
+	/**
+	 * 设置好状态之后返回
+	 */
 	g_reactor_state = SPDK_REACTOR_STATE_INITIALIZED;
 
 	return 0;
@@ -897,6 +916,7 @@ _reactor_run(struct spdk_reactor *reactor)
 	uint64_t		now;
 	int			rc;
 
+	/* 处理 reactor 上的 event 消息 */
 	event_queue_run_batch(reactor);
 
 	/* If no threads are present on the reactor,
@@ -909,6 +929,7 @@ _reactor_run(struct spdk_reactor *reactor)
 		return;
 	}
 
+	/* 每一个 reactor 上注册的 thread 进行遍历并处理 poller 事件 */
 	TAILQ_FOREACH_SAFE(lw_thread, &reactor->threads, link, tmp) {
 		thread = spdk_thread_get_from_ctx(lw_thread);
 		rc = spdk_thread_poll(thread, 0, reactor->tsc_last);
@@ -944,6 +965,7 @@ reactor_run(void *arg)
 
 	reactor->tsc_last = spdk_get_ticks();
 
+	/* 执行死循环 */
 	while (1) {
 		/* Execute interrupt process fn if this reactor currently runs in interrupt state */
 		if (spdk_unlikely(reactor->in_interrupt)) {
@@ -968,11 +990,13 @@ reactor_run(void *arg)
 			_reactors_scheduler_gather_metrics(NULL, NULL);
 		}
 
+		/* 检查 reactor 状态 */
 		if (g_reactor_state != SPDK_REACTOR_STATE_RUNNING) {
 			break;
 		}
 	}
 
+	/* reactor 退出，结束其上所有线程 */
 	TAILQ_FOREACH(lw_thread, &reactor->threads, link) {
 		thread = spdk_thread_get_from_ctx(lw_thread);
 		/* All threads should have already had spdk_thread_exit() called on them, except
@@ -989,6 +1013,7 @@ reactor_run(void *arg)
 		}
 	}
 
+	/* 结束所有线程 */
 	while (!TAILQ_EMPTY(&reactor->threads)) {
 		TAILQ_FOREACH_SAFE(lw_thread, &reactor->threads, link, tmp) {
 			thread = spdk_thread_get_from_ctx(lw_thread);
@@ -1040,18 +1065,21 @@ spdk_reactors_start(void)
 	int rc;
 
 	g_rusage_period = (CONTEXT_SWITCH_MONITOR_PERIOD * spdk_get_ticks_hz()) / SPDK_SEC_TO_USEC;
+	/* 设置为运行状态 */
 	g_reactor_state = SPDK_REACTOR_STATE_RUNNING;
 	/* Reinitialize to false, in case the app framework is restarting in the same process. */
 	g_stopping_reactors = false;
 
 	current_core = spdk_env_get_current_core();
 	SPDK_ENV_FOREACH_CORE(i) {
+		/* 绑定其他 core */
 		if (i != current_core) {
 			reactor = spdk_reactor_get(i);
 			if (reactor == NULL) {
 				continue;
 			}
 
+			/* 设置好线程创建后的一个消息，该消息为轮询函数 */
 			rc = spdk_env_thread_launch_pinned(reactor->lcore, reactor_run, reactor);
 			if (rc < 0) {
 				SPDK_ERRLOG("Unable to start reactor thread on core %u\n", reactor->lcore);
@@ -1062,7 +1090,10 @@ spdk_reactors_start(void)
 		spdk_cpuset_set_cpu(&g_reactor_core_mask, i, true);
 	}
 
-	/* Start the main reactor */
+	/**
+	 * Start the main reactor
+	 * 当前 cpu core 得到 reactor 并开始轮询
+	 */
 	reactor = spdk_reactor_get(current_core);
 	assert(reactor != NULL);
 	reactor_run(reactor);
@@ -1137,6 +1168,7 @@ _schedule_thread(void *arg1, void *arg2)
 
 	lw_thread->lcore = current_core;
 
+	/* 将该 thread 加入到 reactor 中 */
 	TAILQ_INSERT_TAIL(&reactor->threads, lw_thread, link);
 	reactor->thread_count++;
 
@@ -1244,6 +1276,7 @@ _reactor_schedule_thread(struct spdk_thread *thread)
 
 	lw_thread->tsc_start = spdk_get_ticks();
 
+	/* 传递该 event，即对应的 reactor 会调用 _schedule_thread 方法 */
 	spdk_event_call(evt);
 
 	return 0;

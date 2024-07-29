@@ -512,6 +512,7 @@ bootstrap_fn(void *arg1)
 						     NULL, !g_spdk_app.json_config_ignore_errors);
 	} else {
 		if (!g_delay_subsystem_init) {
+			/* 初始化子系统 */
 			spdk_subsystem_init(app_start_rpc, NULL);
 		} else {
 			spdk_rpc_set_allowlist(g_spdk_app.rpc_allowlist);
@@ -797,6 +798,9 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 
 	SPDK_NOTICELOG("Total cores available: %d\n", spdk_env_get_core_count());
 
+	/**
+	 * 初始化 reactor
+	 */
 	if ((rc = spdk_reactors_init(opts->msg_mempool_size)) != 0) {
 		SPDK_ERRLOG("Reactor Initialization failed: rc = %d\n", rc);
 		return 1;
@@ -804,7 +808,10 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 
 	spdk_cpuset_set_cpu(&tmp_cpumask, spdk_env_get_current_core(), true);
 
-	/* Now that the reactors have been initialized, we can create the app thread. */
+	/**
+	 * Now that the reactors have been initialized, we can create the app thread.
+	 * 初始化主线程
+	 */
 	spdk_thread_create("app_thread", &tmp_cpumask);
 	if (!spdk_thread_get_app_thread()) {
 		SPDK_ERRLOG("Unable to create an spdk_thread for initialization\n");
@@ -833,6 +840,9 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 	g_start_fn = start_fn;
 	g_start_arg = arg1;
 
+	/**
+	 * 发消息由主线程初始化执行 bootstrap_fn 函数
+	 */
 	spdk_thread_send_msg(spdk_thread_get_app_thread(), bootstrap_fn, NULL);
 
 	/* This blocks until spdk_app_stop is called */

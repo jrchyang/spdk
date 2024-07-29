@@ -449,10 +449,16 @@ spdk_thread_lib_init_ext(spdk_thread_op_fn thread_op_fn,
 	if (thread_op_fn == NULL && thread_op_supported_fn == NULL) {
 		SPDK_INFOLOG(thread, "thread_op_fn and thread_op_supported_fn were not specified\n");
 	} else {
+		/**
+		 * 设置线程处理函数
+		 */
 		g_thread_op_fn = thread_op_fn;
 		g_thread_op_supported_fn = thread_op_supported_fn;
 	}
 
+	/**
+	 * 初始化线程消息内存池
+	 */
 	return _thread_lib_init(ctx_sz, msg_mempool_sz);
 }
 
@@ -487,6 +493,7 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 	struct spdk_msg *msgs[SPDK_MSG_MEMPOOL_CACHE_SIZE];
 	int rc = 0, i;
 
+	/* 创建本县城的 ctx 上下文 */
 	thread = calloc(1, sizeof(*thread) + g_ctx_sz);
 	if (!thread) {
 		SPDK_ERRLOG("Unable to allocate memory for thread\n");
@@ -499,6 +506,7 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 		spdk_cpuset_negate(&thread->cpumask);
 	}
 
+	/* 初始化各项资源 */
 	RB_INIT(&thread->io_channels);
 	TAILQ_INIT(&thread->active_pollers);
 	RB_INIT(&thread->timed_pollers);
@@ -545,6 +553,7 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 		return NULL;
 	}
 	thread->id = g_thread_id++;
+	/* 添加到全局队列中 */
 	TAILQ_INSERT_TAIL(&g_threads, thread, tailq);
 	g_thread_count++;
 	pthread_mutex_unlock(&g_devlist_mutex);
@@ -561,6 +570,7 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 		}
 	}
 
+	/* 调用线程处理函数 */
 	if (g_new_thread_fn) {
 		rc = g_new_thread_fn(thread);
 	} else if (g_thread_op_supported_fn && g_thread_op_supported_fn(SPDK_THREAD_OP_NEW)) {
@@ -572,6 +582,7 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 		return NULL;
 	}
 
+	/* 将线程设置为运行状态 */
 	thread->state = SPDK_THREAD_STATE_RUNNING;
 
 	/* If this is the first thread, save it as the app thread.  Use an atomic
@@ -1067,11 +1078,13 @@ thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 		rc = 1;
 	}
 
+	/* 首先处理 ring 传递过来的消息 */
 	msg_count = msg_queue_run_batch(thread, max_msgs);
 	if (msg_count) {
 		rc = 1;
 	}
 
+	/* 调用非定时 poller 中的方法 - 自定义 io_channel 中的 poller */
 	TAILQ_FOREACH_REVERSE_SAFE(poller, &thread->active_pollers,
 				   active_pollers_head, tailq, tmp) {
 		int poller_rc;
@@ -1082,6 +1095,7 @@ thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 		}
 	}
 
+	/* 调用定时 poller 中的方法 */
 	poller = thread->first_timed_poller;
 	while (poller != NULL) {
 		int timer_rc = 0;
